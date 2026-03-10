@@ -22,6 +22,8 @@ if sys.platform == 'win32':
 # ============ 配置区 ============
 DATA_DIR = "D:/2026_project"
 PROGRESS_FILE = os.path.join(DATA_DIR, "ai_progress.json")
+AI_RECORD_FILE = os.path.join(DATA_DIR, "ai_practice_record.md")
+OLD_RATIO = 0.3  # 旧题比例
 
 # MiniMax API配置（从daily_paper.py获取）
 MINIMAX_API_KEY = "sk-cp-1kFbjMQf2tAsRZ5WagCyJYJUTx13Rwsx0lob7sNsYgid4ES4D6b1xTYqfb6zRSbd4pz0d4l95AavCfTnCDtgz3Ti2SvY2eef0_EcgI0v2IZdHipnoljZg0Q"
@@ -456,7 +458,12 @@ class AIPracticeApp:
         if os.path.exists(PROGRESS_FILE):
             with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        return {"topics_done": [], "times_practiced": {}}
+        # 新格式：累加记录
+        return {
+            "history": [],        # 所有做过的题目ID
+            "counts": {},         # 每道题练习次数
+            "total_days": 0       # 总练习天数
+        }
 
     def _save_progress(self):
         with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
@@ -532,16 +539,52 @@ class AIPracticeApp:
     def select_topic(self):
         """选择题目"""
         self.show_topics()
+
+        # 判断新题和旧题
+        history = self.progress.get('history', [])
+        new_topics = [t for t in AI_PRACTICE_TOPICS if t['id'] not in history]
+        old_topics = [t for t in AI_PRACTICE_TOPICS if t['id'] in history]
+
+        print(f"新题: {len(new_topics)}道, 旧题: {len(old_topics)}道")
+        print("\n请选择:")
+        print("  0. 随机混合 (70%新题 + 30%旧题)")
+        for i, topic in enumerate(AI_PRACTICE_TOPICS):
+            status = "[复习]" if topic['id'] in history else ""
+            times = self.progress.get('counts', {}).get(topic['id'], 0)
+            print(f"  {i+1}. {topic['title']} {status} (练习{times}次)")
+        print()
+
         try:
-            choice = int(input("请选择题目 (1-{}): ".format(len(AI_PRACTICE_TOPICS))))
-            if 1 <= choice <= len(AI_PRACTICE_TOPICS):
-                self.current_topic = AI_PRACTICE_TOPICS[choice - 1]
-                self.current_step = 0
-                return True
+            choice = input("请选择 (0-{}): ".format(len(AI_PRACTICE_TOPICS)))
+
+            if choice == "0":
+                # 混合模式
+                if not history:
+                    # 第一次，随机选
+                    self.current_topic = random.choice(AI_PRACTICE_TOPICS)
+                else:
+                    # 70%新题，30%旧题
+                    if new_topics and random.random() > OLD_RATIO:
+                        self.current_topic = random.choice(new_topics)
+                    else:
+                        # 旧题优先选练习次数少的
+                        old_sorted = sorted(old_topics,
+                                          key=lambda t: self.progress['counts'].get(t['id'], 0))
+                        self.current_topic = random.choice(old_sorted[:3]) if len(old_sorted) > 3 else random.choice(old_sorted)
+            else:
+                idx = int(choice) - 1
+                if 0 <= idx < len(AI_PRACTICE_TOPICS):
+                    self.current_topic = AI_PRACTICE_TOPICS[idx]
+                else:
+                    print("无效选择")
+                    return False
+
+            self.current_step = 0
+            return True
+
         except:
-            pass
-        print("无效选择")
-        return False
+            print("无效选择")
+            return False
 
     def show_current_task(self):
         """展示当前任务"""
@@ -633,13 +676,18 @@ class AIPracticeApp:
         print("练习完成!")
         print("=" * 50)
 
-        # 记录进度
-        if topic['id'] not in self.progress['topics_done']:
-            self.progress['topics_done'].append(topic['id'])
+        # 记录进度（累加，不删除）
+        if topic['id'] not in self.progress['history']:
+            self.progress['history'].append(topic['id'])
 
-        times = self.progress.get('times_practiced', {}).get(topic['id'], 0)
-        self.progress.setdefault('times_practiced', {})[topic['id']] = times + 1
+        counts = self.progress.get('counts', {})
+        counts[topic['id']] = counts.get(topic['id'], 0) + 1
+        self.progress['counts'] = counts
+        self.progress['total_days'] = self.progress.get('total_days', 0) + 1
         self._save_progress()
+
+        # 记录到文档
+        self.record_to_file(topic)
 
     def show_answer(self):
         """展示答案"""
@@ -649,6 +697,43 @@ class AIPracticeApp:
         print("```python")
         print(self.current_topic['answer'])
         print("```")
+
+    def record_to_file(self, topic):
+        """记录练习到文档"""
+        today = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"\n## 练习日期: {today}",
+            f"\n### 题目: {topic['title']}",
+            f"\n**描述**: {topic['description']}",
+            f"\n**步骤**:"
+        ]
+
+        for i, step in enumerate(topic['steps']):
+            lines.append(f"{i+1}. {step['name']}: {step['hint'][:100]}...")
+
+        lines.append(f"\n**答案代码**:")
+        lines.append("```python")
+        lines.append(topic['answer'])
+        lines.append("```")
+        lines.append("")
+
+        new_content = "\n".join(lines)
+
+        # 检查是否已存在
+        if os.path.exists(AI_RECORD_FILE):
+            with open(AI_RECORD_FILE, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            if today.split()[0] in existing:
+                print(f"[*] 今日记录已存在，跳过写入")
+                return
+        else:
+            existing = "# AI模型手撕练习记录\n"
+
+        with open(AI_RECORD_FILE, 'w', encoding='utf-8') as f:
+            f.write(existing + new_content)
+
+        print(f"[*] 已记录到 {AI_RECORD_FILE}")
 
     def run(self):
         """主循环"""
@@ -675,9 +760,10 @@ class AIPracticeApp:
             if choice == "3":
                 break
             elif choice == "2":
-                print(f"\n已完成: {len(self.progress.get('topics_done', []))} 个主题")
-                total = sum(self.progress.get('times_practiced', {}).values())
+                print(f"\n已完成: {len(self.progress.get('history', []))} 个主题")
+                total = sum(self.progress.get('counts', {}).values())
                 print(f"总练习次数: {total}")
+                print(f"总练习天数: {self.progress.get('total_days', 0)}")
 
         print("\n再见！坚持练习一定能进步！")
 
