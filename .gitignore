@@ -1,0 +1,13 @@
+# 临时文件
+*.pyc
+__pycache__/
+*.json
+!package.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
